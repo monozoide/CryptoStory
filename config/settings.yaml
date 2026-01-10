@@ -1,0 +1,28 @@
+app:
+  name: cryptostory
+  version: 1.0.0
+
+database:
+  host: \${DB_HOST:localhost}
+  port: \${DB_PORT:5432}
+  user: \${DB_USER:postgres}
+  password: \${DB_PASSWORD:postgres}
+  name: \${DB_NAME:cryptostory}
+
+api:
+  binance:
+    base_url: https://api.binance.com
+    timeout: 30
+
+scheduler:
+  type: systemd
+
+symbols:
+  whitelist:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+  intervals:
+    - '1m'
+    - '1h'
+    - '1d'
