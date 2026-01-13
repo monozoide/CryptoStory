@@ -1,56 +1,118 @@
-# tests/conftest.py
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy_utils import database_exists, create_database, drop_database
-from sqlalchemy import text
+import pytest
+import sqlite3
+import aiosqlite
+from pathlib import Path
 
-from cryptostory.infrastructure.database.session import get_database_url
-from cryptostory.infrastructure.database.schema import metadata
-
-
-@pytest_asyncio.fixture(scope="session", autouse=True)
+@pytest.fixture
 async def test_db():
-    """Create and tear down a test database."""
-    test_db_url = get_database_url(testing=True)
-    sync_test_db_url = test_db_url.replace("asyncpg", "psycopg2")
+    """
+    Setup in-memory SQLite database with all required tables.
+    """
+    conn = await aiosqlite.connect(":memory:")
 
-    if database_exists(sync_test_db_url):
-        drop_database(sync_test_db_url)
-    create_database(sync_test_db_url)
+    # Lire et exécuter le script de migration
+    migration_file = Path(__file__).parent.parent / "cryptostory" / "backend" / "dal" / "migrations" / "001_initial_schema.sql"
 
-    engine = create_async_engine(test_db_url)
-    async with engine.begin() as conn:
-        await conn.run_sync(metadata.create_all)
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb;"))
-        await conn.execute(
-            text(
-                "SELECT create_hypertable('candles', 'open_time', if_not_exists => TRUE);"
+    if migration_file.exists():
+        with open(migration_file, 'r') as f:
+            schema_sql = f.read()
+        await conn.executescript(schema_sql)
+    else:
+        # Fallback: créer les tables manuellement
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS configured_symbols (
+                symbolid TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                quote TEXT NOT NULL,
+                interval TEXT NOT NULL,
+                exchange TEXT NOT NULL DEFAULT 'BINANCE',
+                isactive INTEGER DEFAULT 1,
+                createdat TEXT DEFAULT CURRENT_TIMESTAMP,
+                updatedat TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(exchange, symbol, quote, interval)
             )
-        )
+        """)
 
-    yield
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS taskexecutions (
+                executionid TEXT PRIMARY KEY,
+                taskname TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                interval TEXT NOT NULL,
+                scheduledat TEXT NOT NULL,
+                startedat TEXT,
+                completedat TEXT,
+                durationseconds REAL,
+                status TEXT NOT NULL CHECK(status IN ('PENDING', 'RUNNING', 'SUCCESS', 'FAILURE', 'TIMEOUT')),
+                exitcode INTEGER,
+                stdout TEXT,
+                stderr TEXT,
+                importid TEXT,
+                createdat TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
-    drop_database(sync_test_db_url)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS importlogs (
+                importid TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                quote TEXT NOT NULL,
+                interval TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                starttime INTEGER,
+                endtime INTEGER,
+                limitparam INTEGER DEFAULT 1000,
+                executionstart TEXT NOT NULL,
+                executionend TEXT,
+                durationseconds REAL,
+                recordsreceived INTEGER DEFAULT 0,
+                recordsinserted INTEGER DEFAULT 0,
+                recordsupdated INTEGER DEFAULT 0,
+                recordsfailed INTEGER DEFAULT 0,
+                status TEXT NOT NULL CHECK(status IN ('SUCCESS', 'PARTIAL', 'FAILURE')),
+                errormessage TEXT,
+                errorcode INTEGER,
+                triggeredby TEXT NOT NULL CHECK(triggeredby IN ('MANUAL', 'SCHEDULER', 'RETRY')),
+                createdat TEXT DEFAULT CURRENT_TIMESTAMP,
+                updatedat TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
+    await conn.commit()
 
-@pytest_asyncio.fixture(scope="function")
-async def db_session(test_db) -> AsyncSession:
-    """Provides a transactional session for each test function."""
-    test_db_url = get_database_url(testing=True)
-    engine = create_async_engine(test_db_url)
-    connection = await engine.connect()
-    trans = await connection.begin()
+    yield conn
 
-    TestingSessionLocal = sessionmaker(
-        bind=connection, class_=AsyncSession, expire_on_commit=False
-    )
-    session = TestingSessionLocal()
+    await conn.close()
 
-    try:
-        yield session
-    finally:
-        await session.close()
-        await trans.rollback()
-        await connection.close()
-        await engine.dispose()
+@pytest.fixture
+def sample_configured_symbol():
+    """Fixture pour créer un symbole configuré de test"""
+    from uuid import uuid4
+    from datetime import datetime, timezone
+
+    return {
+        'symbolid': str(uuid4()),
+        'symbol': 'BTC',
+        'quote': 'USDT',
+        'interval': '1h',
+        'exchange': 'BINANCE',
+        'isactive': 1,
+        'createdat': datetime.now(timezone.utc).isoformat(),
+        'updatedat': datetime.now(timezone.utc).isoformat()
+    }
+
+@pytest.fixture
+def sample_fetchjob():
+    """Fixture pour créer un FetchJob de test"""
+    from uuid import uuid4
+    from datetime import datetime, timezone
+
+    return {
+        'executionid': str(uuid4()),
+        'taskname': 'BTCUSDT_1h_fetch',
+        'symbol': 'BTCUSDT',
+        'interval': '1h',
+        'scheduledat': datetime.now(timezone.utc).isoformat(),
+        'status': 'PENDING',
+        'createdat': datetime.now(timezone.utc).isoformat()
+    }
